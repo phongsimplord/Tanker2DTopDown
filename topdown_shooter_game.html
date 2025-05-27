@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game Bắn Súng 2D Top-Down</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #1a1a2e;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        
+        #gameContainer {
+            position: relative;
+            background: #16213e;
+            border: 3px solid #0f3460;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(15, 52, 96, 0.5);
+        }
+        
+        #gameCanvas {
+            display: block;
+            cursor: crosshair;
+            background: linear-gradient(45deg, #0f3460 0%, #16213e 50%, #1a1a2e 100%);
+        }
+        
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #00ff88;
+            font-size: 18px;
+            text-shadow: 0 0 10px rgba(0, 255, 136, 0.8);
+            z-index: 10;
+        }
+        
+        .menu-button {
+            background: linear-gradient(45deg, #0f3460, #16213e);
+            border: 2px solid #00ff88;
+            color: #00ff88;
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 10px;
+            text-shadow: 0 0 10px rgba(0, 255, 136, 0.8);
+            box-shadow: 0 0 15px rgba(0, 255, 136, 0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .menu-button:hover {
+            background: linear-gradient(45deg, #16213e, #0f3460);
+            box-shadow: 0 0 25px rgba(0, 255, 136, 0.6);
+            transform: translateY(-2px);
+        }
+
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="1000" height="700"></canvas>
+        <div id="ui">
+            <div>❤️ Máu: <span id="health">5</span>/5</div>
+            <div>🎯 Điểm: <span id="score">0</span></div>
+            <div>👹 Enemies: <span id="enemyCount">0</span></div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const ui = {
+            health: document.getElementById('health'),
+            score: document.getElementById('score'),
+            enemyCount: document.getElementById('enemyCount')
+        };
+
+        // Game states
+        const GAME_STATES = {
+            MENU: 'menu',
+            PLAYING: 'playing',
+            GAME_OVER: 'gameOver'
+        };
+
+        // Game state
+        const game = {
+            state: GAME_STATES.MENU,
+            score: 0,
+            mouseX: canvas.width / 2,
+            mouseY: canvas.height / 2,
+            keys: {},
+            mouseDown: false,
+            lastShot: 0,
+            shootDelay: 120, // ms between shots
+            lastEnemySpawn: 0,
+            enemySpawnDelay: 2000, // Start with 2 seconds between spawns
+            minEnemySpawnDelay: 300, // Minimum spawn delay
+            difficultyLevel: 1
+        };
+
+        // Player object
+        const player = {
+            x: canvas.width / 2,
+            y: canvas.height / 2,
+            width: 30,
+            height: 30,
+            speed: 6,
+            health: 5,
+            maxHealth: 5,
+            angle: 0
+        };
+
+        // Arrays for game objects
+        const bullets = [];
+        const enemies = [];
+        const particles = [];
+
+        // Input handling
+        document.addEventListener('keydown', (e) => {
+            game.keys[e.key.toLowerCase()] = true;
+        });
+
+        document.addEventListener('keyup', (e) => {
+            game.keys[e.key.toLowerCase()] = false;
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            game.mouseX = e.clientX - rect.left;
+            game.mouseY = e.clientY - rect.top;
+            
+            if (game.state === GAME_STATES.PLAYING) {
+                // Calculate angle from player to mouse
+                const dx = game.mouseX - player.x;
+                const dy = game.mouseY - player.y;
+                player.angle = Math.atan2(dy, dx);
+            }
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) { // Left click
+                if (game.state === GAME_STATES.PLAYING) {
+                    game.mouseDown = true;
+                    shoot();
+                } else if (game.state === GAME_STATES.MENU) {
+                    checkMenuClick(game.mouseX, game.mouseY);
+                } else if (game.state === GAME_STATES.GAME_OVER) {
+                    checkGameOverClick(game.mouseX, game.mouseY);
+                }
+            }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (e.button === 0) {
+                game.mouseDown = false;
+            }
+        });
+
+        // Prevent context menu
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+
+        // Bullet class
+        class Bullet {
+            constructor(x, y, angle, speed = 12) {
+                this.x = x;
+                this.y = y;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.size = 4;
+                this.life = 100;
+                this.maxLife = 100;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life--;
+                
+                return this.life > 0 && 
+                       this.x > -10 && this.x < canvas.width + 10 && 
+                       this.y > -10 && this.y < canvas.height + 10;
+            }
+
+            draw() {
+                const alpha = this.life / this.maxLife;
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = '#ffff00';
+                ctx.shadowColor = '#ffff00';
+                ctx.shadowBlur = 10;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // Enemy class
+        class Enemy {
+            constructor() {
+                this.size = 15 + Math.random() * 10;
+                // Speed balanced with player speed (player has 6, enemies 1-4)
+                this.speed = 1 + Math.random() * 3;
+                this.health = 1;
+                this.maxHealth = 1;
+                this.damage = 1;
+                
+                // Spawn randomly anywhere on map (not just edges)
+                const spawnMargin = 50;
+                const spawnZone = Math.random();
+                
+                if (spawnZone < 0.4) {
+                    // Spawn from edges (60% chance)
+                    const side = Math.floor(Math.random() * 4);
+                    switch(side) {
+                        case 0: // Top
+                            this.x = Math.random() * canvas.width;
+                            this.y = -spawnMargin;
+                            break;
+                        case 1: // Right
+                            this.x = canvas.width + spawnMargin;
+                            this.y = Math.random() * canvas.height;
+                            break;
+                        case 2: // Bottom
+                            this.x = Math.random() * canvas.width;
+                            this.y = canvas.height + spawnMargin;
+                            break;
+                        case 3: // Left
+                            this.x = -spawnMargin;
+                            this.y = Math.random() * canvas.height;
+                            break;
+                    }
+                } else {
+                    // Spawn randomly anywhere on screen (40% chance)
+                    this.x = Math.random() * canvas.width;
+                    this.y = Math.random() * canvas.height;
+                    
+                    // Make sure not too close to player
+                    const distToPlayer = Math.sqrt((this.x - player.x) ** 2 + (this.y - player.y) ** 2);
+                    if (distToPlayer < 100) {
+                        // Respawn at edge if too close
+                        const side = Math.floor(Math.random() * 4);
+                        switch(side) {
+                            case 0: this.x = Math.random() * canvas.width; this.y = -spawnMargin; break;
+                            case 1: this.x = canvas.width + spawnMargin; this.y = Math.random() * canvas.height; break;
+                            case 2: this.x = Math.random() * canvas.width; this.y = canvas.height + spawnMargin; break;
+                            case 3: this.x = -spawnMargin; this.y = Math.random() * canvas.height; break;
+                        }
+                    }
+                }
+            }
+
+            update() {
+                // Move towards player
+                const dx = player.x - this.x;
+                const dy = player.y - this.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance > 0) {
+                    this.x += (dx / distance) * this.speed;
+                    this.y += (dy / distance) * this.speed;
+                }
+
+                // Check collision with player
+                const playerDistance = Math.sqrt(
+                    (this.x - player.x) ** 2 + (this.y - player.y) ** 2
+                );
+                
+                if (playerDistance < this.size + player.width / 2) {
+                    player.health -= this.damage;
+                    this.health = 0;
+                    
+                    // Create damage particles
+                    for (let i = 0; i < 8; i++) {
+                        particles.push(new Particle(player.x, player.y, '#ff4444'));
+                    }
+                }
+
+                return this.health > 0;
+            }
+
+            draw() {
+                // Enemy body with pulsing effect
+                const pulse = Math.sin(Date.now() * 0.01) * 0.1 + 1;
+                ctx.fillStyle = '#ff4444';
+                ctx.shadowColor = '#ff4444';
+                ctx.shadowBlur = 10;
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * pulse, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Eye-like details
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(this.x - this.size * 0.3, this.y - this.size * 0.2, this.size * 0.15, 0, Math.PI * 2);
+                ctx.arc(this.x + this.size * 0.3, this.y - this.size * 0.2, this.size * 0.15, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.fillStyle = '#000000';
+                ctx.beginPath();
+                ctx.arc(this.x - this.size * 0.3, this.y - this.size * 0.2, this.size * 0.08, 0, Math.PI * 2);
+                ctx.arc(this.x + this.size * 0.3, this.y - this.size * 0.2, this.size * 0.08, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            takeDamage() {
+                this.health--;
+                if (this.health <= 0) {
+                    game.score += 10;
+                    
+                    // Create explosion particles
+                    for (let i = 0; i < 12; i++) {
+                        particles.push(new Particle(this.x, this.y, '#ff8800'));
+                    }
+                }
+            }
+        }
+
+        // Particle class for effects
+        class Particle {
+            constructor(x, y, color = '#ffffff') {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 12;
+                this.vy = (Math.random() - 0.5) * 12;
+                this.life = 30 + Math.random() * 20;
+                this.maxLife = this.life;
+                this.color = color;
+                this.size = Math.random() * 5 + 2;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vx *= 0.96;
+                this.vy *= 0.96;
+                this.life--;
+                return this.life > 0;
+            }
+
+            draw() {
+                const alpha = this.life / this.maxLife;
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = this.color;
+                ctx.shadowColor = this.color;
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * alpha, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // Initialize/Reset game
+        function initGame() {
+            player.x = canvas.width / 2;
+            player.y = canvas.height / 2;
+            player.health = player.maxHealth;
+            player.angle = 0;
+            
+            game.score = 0;
+            game.lastEnemySpawn = 0;
+            game.enemySpawnDelay = 2000;
+            game.difficultyLevel = 1;
+            
+            bullets.length = 0;
+            enemies.length = 0;
+            particles.length = 0;
+        }
+
+        // Menu functions
+        function checkMenuClick(x, y) {
+            // Play button: center, 200px wide, 60px tall
+            const playButton = {
+                x: canvas.width / 2 - 100,
+                y: canvas.height / 2 - 30,
+                width: 200,
+                height: 60
+            };
+            
+            // Quit button
+            const quitButton = {
+                x: canvas.width / 2 - 100,
+                y: canvas.height / 2 + 50,
+                width: 200,
+                height: 60
+            };
+            
+            if (x >= playButton.x && x <= playButton.x + playButton.width &&
+                y >= playButton.y && y <= playButton.y + playButton.height) {
+                startGame();
+            }
+            
+            if (x >= quitButton.x && x <= quitButton.x + quitButton.width &&
+                y >= quitButton.y && y <= quitButton.y + quitButton.height) {
+                window.close();
+            }
+        }
+
+        function checkGameOverClick(x, y) {
+            // Play Again button
+            const playButton = {
+                x: canvas.width / 2 - 100,
+                y: canvas.height / 2 + 50,
+                width: 200,
+                height: 60
+            };
+            
+            if (x >= playButton.x && x <= playButton.x + playButton.width &&
+                y >= playButton.y && y <= playButton.y + playButton.height) {
+                startGame();
+            }
+        }
+
+        function startGame() {
+            game.state = GAME_STATES.PLAYING;
+            initGame();
+        }
+
+        // Shooting function
+        function shoot() {
+            const now = Date.now();
+            if (now - game.lastShot < game.shootDelay) return;
+            
+            const bulletX = player.x + Math.cos(player.angle) * player.width / 2;
+            const bulletY = player.y + Math.sin(player.angle) * player.height / 2;
+            
+            bullets.push(new Bullet(bulletX, bulletY, player.angle));
+            game.lastShot = now;
+            
+            // Muzzle flash particles
+            for (let i = 0; i < 4; i++) {
+                particles.push(new Particle(bulletX, bulletY, '#ffff88'));
+            }
+        }
+
+        // Update player
+        function updatePlayer() {
+            // Movement
+            if (game.keys['w'] || game.keys['arrowup']) {
+                player.y = Math.max(player.height / 2, player.y - player.speed);
+            }
+            if (game.keys['s'] || game.keys['arrowdown']) {
+                player.y = Math.min(canvas.height - player.height / 2, player.y + player.speed);
+            }
+            if (game.keys['a'] || game.keys['arrowleft']) {
+                player.x = Math.max(player.width / 2, player.x - player.speed);
+            }
+            if (game.keys['d'] || game.keys['arrowright']) {
+                player.x = Math.min(canvas.width - player.width / 2, player.x + player.speed);
+            }
+
+            // Continuous shooting when mouse held
+            if (game.mouseDown) {
+                shoot();
+            }
+
+            // Update UI
+            ui.health.textContent = Math.max(0, player.health);
+            ui.score.textContent = game.score;
+            ui.enemyCount.textContent = enemies.length;
+        }
+
+        // Draw player
+        function drawPlayer() {
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            ctx.rotate(player.angle);
+            
+            // Player body
+            ctx.fillStyle = '#00ff88';
+            ctx.shadowColor = '#00ff88';
+            ctx.shadowBlur = 15;
+            ctx.fillRect(-player.width / 2, -player.height / 2, player.width, player.height);
+            
+            // Gun barrel
+            ctx.fillStyle = '#888888';
+            ctx.shadowBlur = 5;
+            ctx.fillRect(player.width / 2 - 5, -3, 20, 6);
+            
+            ctx.restore();
+            
+            // Health hearts
+            for (let i = 0; i < player.maxHealth; i++) {
+                const heartX = player.x - (player.maxHealth * 15) / 2 + i * 15;
+                const heartY = player.y - player.height / 2 - 25;
+                
+                ctx.fillStyle = i < player.health ? '#ff4444' : '#444444';
+                ctx.font = '16px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('❤️', heartX, heartY);
+            }
+        }
+
+
+
+        // Spawn enemies with scaling difficulty
+        function spawnEnemies() {
+            const now = Date.now();
+            
+            // Calculate difficulty scaling
+            const newDifficultyLevel = Math.floor(game.score / 100) + 1;
+            if (newDifficultyLevel > game.difficultyLevel) {
+                game.difficultyLevel = newDifficultyLevel;
+                // Decrease spawn delay as difficulty increases
+                game.enemySpawnDelay = Math.max(game.minEnemySpawnDelay, 
+                    2000 - (game.difficultyLevel - 1) * 200);
+            }
+            
+            if (now - game.lastEnemySpawn > game.enemySpawnDelay) {
+                // Start with 1-2 enemies, increase with difficulty
+                const baseEnemies = Math.random() < 0.7 ? 1 : 2;
+                const bonusEnemies = Math.floor((game.difficultyLevel - 1) / 2);
+                const enemyCount = baseEnemies + bonusEnemies;
+                
+                for (let i = 0; i < enemyCount; i++) {
+                    enemies.push(new Enemy());
+                }
+                
+                game.lastEnemySpawn = now;
+            }
+        }
+
+        // Collision detection
+        function checkCollisions() {
+            bullets.forEach((bullet, bulletIndex) => {
+                enemies.forEach((enemy, enemyIndex) => {
+                    const distance = Math.sqrt(
+                        (bullet.x - enemy.x) ** 2 + (bullet.y - enemy.y) ** 2
+                    );
+                    
+                    if (distance < bullet.size + enemy.size) {
+                        enemy.takeDamage();
+                        bullets.splice(bulletIndex, 1);
+                        
+                        if (enemy.health <= 0) {
+                            enemies.splice(enemyIndex, 1);
+                        }
+                    }
+                });
+            });
+        }
+
+        // Draw main menu
+        function drawMenu() {
+            // Background
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Title
+            ctx.fillStyle = '#00ff88';
+            ctx.font = 'bold 48px Arial';
+            ctx.textAlign = 'center';
+            ctx.shadowColor = '#00ff88';
+            ctx.shadowBlur = 20;
+            ctx.fillText('🎯 SHOOTER GAME', canvas.width / 2, canvas.height / 2 - 120);
+            
+            // Subtitle
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '18px Arial';
+            ctx.shadowBlur = 10;
+            ctx.fillText('WASD để di chuyển • Click chuột để bắn', canvas.width / 2, canvas.height / 2 - 80);
+            
+            // Play button
+            drawButton(canvas.width / 2 - 100, canvas.height / 2 - 30, 200, 60, '🎮 CHƠI', '#00ff88');
+            
+            // Quit button
+            drawButton(canvas.width / 2 - 100, canvas.height / 2 + 50, 200, 60, '❌ THOÁT', '#ff4444');
+        }
+
+        // Draw game over screen
+        function drawGameOver() {
+            // Background
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Game Over text
+            ctx.fillStyle = '#ff4444';
+            ctx.font = 'bold 48px Arial';
+            ctx.textAlign = 'center';
+            ctx.shadowColor = '#ff4444';
+            ctx.shadowBlur = 20;
+            ctx.fillText('💀 GAME OVER', canvas.width / 2, canvas.height / 2 - 80);
+            
+            // Score
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '24px Arial';
+            ctx.shadowBlur = 10;
+            ctx.fillText(`Điểm cuối cùng: ${game.score}`, canvas.width / 2, canvas.height / 2 - 20);
+            
+            // High score message
+            if (game.score >= 500) {
+                ctx.fillStyle = '#ffff00';
+                ctx.fillText('🏆 Điểm số tuyệt vời!', canvas.width / 2, canvas.height / 2 + 10);
+            } else if (game.score >= 200) {
+                ctx.fillStyle = '#00ff88';
+                ctx.fillText('✨ Chơi tốt!', canvas.width / 2, canvas.height / 2 + 10);
+            }
+            
+            // Play again button
+            drawButton(canvas.width / 2 - 100, canvas.height / 2 + 50, 200, 60, '🔄 CHƠI TIẾP', '#00ff88');
+        }
+
+        // Helper function to draw buttons
+        function drawButton(x, y, width, height, text, color) {
+            // Button background
+            ctx.fillStyle = 'rgba(15, 52, 96, 0.8)';
+            ctx.fillRect(x, y, width, height);
+            
+            // Button border
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 15;
+            ctx.strokeRect(x, y, width, height);
+            
+            // Button text
+            ctx.fillStyle = color;
+            ctx.font = 'bold 20px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(text, x + width / 2, y + height / 2 + 7);
+        }
+
+        // Game loop
+        function gameLoop() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.shadowBlur = 0;
+
+            if (game.state === GAME_STATES.MENU) {
+                drawMenu();
+            } else if (game.state === GAME_STATES.PLAYING) {
+                // Check game over condition
+                if (player.health <= 0) {
+                    game.state = GAME_STATES.GAME_OVER;
+                }
+
+                // Update game objects
+                updatePlayer();
+                spawnEnemies();
+                checkCollisions();
+
+                // Update bullets
+                for (let i = bullets.length - 1; i >= 0; i--) {
+                    if (!bullets[i].update()) {
+                        bullets.splice(i, 1);
+                    }
+                }
+
+                // Update enemies
+                for (let i = enemies.length - 1; i >= 0; i--) {
+                    if (!enemies[i].update()) {
+                        enemies.splice(i, 1);
+                    }
+                }
+
+                // Update particles
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    if (!particles[i].update()) {
+                        particles.splice(i, 1);
+                    }
+                }
+
+                // Draw everything
+                bullets.forEach(bullet => bullet.draw());
+                enemies.forEach(enemy => enemy.draw());
+                particles.forEach(particle => particle.draw());
+                drawPlayer();
+                
+            } else if (game.state === GAME_STATES.GAME_OVER) {
+                drawGameOver();
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start game loop
+        gameLoop();
+    </script>
+</body>
+</html>
